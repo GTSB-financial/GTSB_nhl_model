@@ -6,6 +6,7 @@ from collections import defaultdict
 import json
 import math
 from bs4 import BeautifulSoup
+import pytz
 
 # ------------------------------------------
 # SIMPLE IN-MEMORY CACHE FOR O/U SCRAPER
@@ -1027,11 +1028,13 @@ def main():
     # Title (same as before)
     st.title("GTSB Winners Only Board")
 
-    # Nicely formatted date
-    today_str = datetime.now().strftime("%B %d, %Y")
+    # Force timezone to Central Time
+    central = pytz.timezone("America/Chicago")
+    now_ct = datetime.now(central)
 
-    # Timestamp
-    updated_str = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    today_str = now_ct.strftime("%B %d, %Y")
+    updated_str = now_ct.strftime("%Y-%m-%d %I:%M:%S %p")
+
 
     # Larger header + timestamp underneath
     st.markdown(
