@@ -148,6 +148,7 @@ def decimal_to_prob(decimal_odds):
     except:
         return None
 
+@st.cache_data(ttl=1800)  # cache for 30 minutes
 def get_team_game_log_apiweb(team_abbr):
     """
     Fetch per-game GF, GA, SF, SA for a team using NHL API-Web.
@@ -214,7 +215,10 @@ def get_team_game_log_apiweb(team_abbr):
 # ---------------------------------------------------------
 # LOAD TODAY'S NHL GAMES
 # ---------------------------------------------------------
+@st.cache_data(ttl=300)
 def get_games_today():
+
+
     """Fetch today's NHL games safely (avoid 429 rate limit crashes)."""
     today = datetime.today().strftime("%Y-%m-%d")
     url = f"https://api-web.nhle.com/v1/schedule/{today}"
@@ -252,6 +256,7 @@ def get_games_today():
 # ---------------------------------------------------------
 # ODDS (DRAFTKINGS ONLY)
 # ---------------------------------------------------------
+@st.cache_data(ttl=300)  # cache for 5 minutes
 def get_odds_draftkings_only():
     url = "https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds"
     params = {
@@ -418,6 +423,7 @@ def win_prob_normal(pred_total, line, side, sigma=2.00):
 # ---------------------------------------------------------
 # TEAM STATS FROM NATURAL STAT TRICK (ALL SITUATIONS)
 # ---------------------------------------------------------
+@st.cache_data(ttl=21600)  # 6 hours
 def compute_team_stats_from_nst():
     """
     Pulls all-situations team stats from NaturalStatTrick.
@@ -617,6 +623,7 @@ def compute_home_away_splits(team_games):
 
     return splits
 
+@st.cache_data(ttl=21600)
 def fetch_team_over_under():
     """
     NEW VERSION — Scrapes ScoresAndOdds using the updated HTML:
@@ -967,9 +974,16 @@ def render_two_row_table(df):
         function getCellValue(row, index) {
             let cell = row.children[index];
             if (!cell) return 0;
-            let text = cell.innerText.replace("%", "").replace("+", "");
-            return parseFloat(text) || 0;
+
+            let text = cell.innerText
+                .replace("%", "")
+                .replace("+", "")
+                .replace("−", "-"); // safety for unicode minus
+
+            let val = parseFloat(text);
+            return isNaN(val) ? 0 : Math.abs(val);
         }
+
 
         // 4. Sort matchup pairs
         matchups.sort((a, b) => {
