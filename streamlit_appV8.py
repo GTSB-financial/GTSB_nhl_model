@@ -664,7 +664,7 @@ def compute_home_away_splits(team_games):
 
     return splits
 
-@st.cache_data(ttl=21600)
+@st.cache_data(ttl=86400)
 def fetch_team_over_under():
     """
     NEW VERSION — Scrapes ScoresAndOdds using the updated HTML:
