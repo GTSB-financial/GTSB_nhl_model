@@ -1,15 +1,12 @@
 import requests
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from collections import defaultdict
 import json
 import math
 from bs4 import BeautifulSoup
 import pytz
-from datetime import datetime, timezone
-
-NOW_UTC = datetime.now(timezone.utc)
 
 # ------------------------------------------
 # SIMPLE IN-MEMORY CACHE FOR O/U SCRAPER
@@ -94,11 +91,11 @@ ODDS_TEAM_NAME_TO_ABBR = {
     "mammoths": "UTA",
     "Mammoths": "UTA",
 }
+
 TEAM_LOGO_URL = {
     "ANA": "https://cdn.nhle.com/logos/nhl/svg/ANA_light.svg",
-    "ARI": "https://cdn.nhle.com/logos/nhl/svg/ARI_light.svg",   # legacy
-    "UTA": "https://cdn.nhle.com/logos/nhl/svg/UTA_light.svg",   # Utah Mammoth / Utah HC
-
+    "ARI": "https://cdn.nhle.com/logos/nhl/svg/ARI_light.svg",
+    "UTA": "https://cdn.nhle.com/logos/nhl/svg/UTA_light.svg",
     "BOS": "https://cdn.nhle.com/logos/nhl/svg/BOS_light.svg",
     "BUF": "https://cdn.nhle.com/logos/nhl/svg/BUF_light.svg",
     "CGY": "https://cdn.nhle.com/logos/nhl/svg/CGY_light.svg",
@@ -130,6 +127,7 @@ TEAM_LOGO_URL = {
     "WSH": "https://cdn.nhle.com/logos/nhl/svg/WSH_light.svg",
     "WPG": "https://cdn.nhle.com/logos/nhl/svg/WPG_light.svg",
 }
+
 TEAM_TO_SAO_SLUG = {
     "ANA": "ducks",
     "ARI": "coyotes",
@@ -166,16 +164,34 @@ TEAM_TO_SAO_SLUG = {
     "UTA": "mammoth"
 }
 
-
 API_KEY = "abd6a7659c64fd320752e57fef58691b"
 
-# ---------------------------------------------------------
-# TODAY STRING
-# ---------------------------------------------------------
+DEFAULT_STATS = {
+    "games": 0,
+    "GF/G": 2.8,
+    "GA/G": 2.8,
+    "xGF/G": 2.8,
+    "xGA/G": 2.8,
+    "SF/G": 29.0,
+    "SA/G": 29.0,
+    "Pace (SF+SA)": 58.0,
+    "GF/G_last10": 2.8,
+    "GA/G_last10": 2.8,
+    "SF/G_last10": 29.0,
+    "SA/G_last10": 29.0,
+    "Pace_last10": 58.0,
+    "GF_adj": 2.8,
+    "GA_adj": 2.8,
+    "xGF_adj": 2.8,
+    "xGA_adj": 2.8,
+    "Pace_adj": 58.0,
+    "OverPct": None,
+}
+
 def today_ymd():
     return datetime.today().strftime("%Y-%m-%d")
+
 def decimal_to_prob(decimal_odds):
-    """Convert decimal odds (e.g. 1.91) to implied probability (0–1)."""
     try:
         if decimal_odds is None:
             return None
@@ -186,18 +202,13 @@ def decimal_to_prob(decimal_odds):
     except:
         return None
 
-@st.cache_data(ttl=21600)  # cache for 30 minutes
+@st.cache_data(ttl=21600)
 def get_team_game_log_apiweb(team_abbr):
-    """
-    Fetch per-game GF, GA, SF, SA for a team using NHL API-Web.
-    Step 1: get schedule (game IDs)
-    Step 2: for each FINAL game, fetch boxscore and pull score/sog.
-    """
     season = "20252026"
     schedule_url = f"https://api-web.nhle.com/v1/club-schedule-season/{team_abbr}/{season}"
 
     try:
-        schedule = requests.get(schedule_url).json()
+        schedule = requests.get(schedule_url, timeout=15).json()
     except Exception as e:
         print(f"API ERROR: cannot fetch schedule for {team_abbr}: {e}")
         return []
@@ -207,14 +218,13 @@ def get_team_game_log_apiweb(team_abbr):
     final_games = [
         g for g in schedule.get("games", [])
         if g.get("gameState") == "FINAL"
-    ][-10:]   # ⬅️ key change: only last 10
+    ][-10:]
 
     for g in final_games:
         game_id = g["id"]
-
         box_url = f"https://api-web.nhle.com/v1/gamecenter/{game_id}/boxscore"
         try:
-            box = requests.get(box_url).json()
+            box = requests.get(box_url, timeout=15).json()
         except Exception as e:
             print(f"BOX ERROR for game {game_id}: {e}")
             continue
@@ -246,27 +256,16 @@ def get_team_game_log_apiweb(team_abbr):
                 "OPP": opp_abbr,
                 "LOC": "vs" if is_home else "@"
             })
-
-
         except Exception as e:
             print(f"Boxscore missing fields for game {game_id}: {e}")
             continue
 
     return games
 
-
-
-# ---------------------------------------------------------
-# LOAD TODAY'S NHL GAMES
-# ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_games_today():
-    """
-    Fetch today's NHL games — PRE-GAME ONLY.
-    Removes live and completed games.
-    Prevents tomorrow slate rollover.
-    """
-    today_utc = NOW_UTC.date()
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
     url = f"https://api-web.nhle.com/v1/schedule/{today_utc.isoformat()}"
 
     try:
@@ -283,15 +282,13 @@ def get_games_today():
             continue
 
         for g in block.get("games", []):
-
             start = g.get("startTimeUTC")
             if not start:
                 continue
 
             start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
 
-            # ✅ LOCK: pre-game only
-            if start_dt <= NOW_UTC:
+            if start_dt <= now_utc:
                 continue
 
             games.append({
@@ -299,16 +296,12 @@ def get_games_today():
                 "home_abbr": g["homeTeam"]["abbrev"],
                 "away_name": g["awayTeam"]["commonName"]["default"],
                 "home_name": g["homeTeam"]["commonName"]["default"],
-                "startTimeUTC": start,  # optional but useful later
+                "startTimeUTC": start,
             })
 
     return games
 
-
-# ---------------------------------------------------------
-# ODDS (DRAFTKINGS ONLY)
-# ---------------------------------------------------------
-@st.cache_data(ttl=300)  # cache for 5 minutes
+@st.cache_data(ttl=300)
 def get_odds_draftkings_only():
     url = "https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds"
     params = {
@@ -321,8 +314,6 @@ def get_odds_draftkings_only():
     r.raise_for_status()
     return r.json()
 
-
-# Odds API team-name → NHL abbreviation
 TEAM_MAP = {
     "ottawa senators":"OTT","boston bruins":"BOS","st louis blues":"STL","buffalo sabres":"BUF",
     "montreal canadiens":"MTL","new jersey devils":"NJD","minnesota wild":"MIN","carolina hurricanes":"CAR",
@@ -338,7 +329,6 @@ def build_odds_index(payload):
     idx = {}
 
     for event in payload:
-        # ONLY DraftKings
         dk = None
         for b in event.get("bookmakers", []):
             if b.get("key") == "draftkings":
@@ -358,8 +348,6 @@ def build_odds_index(payload):
 
         key = away_abbr + "@" + home_abbr
 
-
-        # extract totals
         for m in dk.get("markets", []):
             if m.get("key") != "totals":
                 continue
@@ -388,13 +376,9 @@ def build_odds_index(payload):
     return idx
 
 def build_ml_odds_index(payload):
-    """
-    Build an index of DraftKings moneyline odds (decimal) keyed by 'AWAY@HOME'.
-    """
     idx = {}
 
     for event in payload:
-        # ONLY DraftKings
         dk = None
         for b in event.get("bookmakers", []):
             if b.get("key") == "draftkings":
@@ -423,7 +407,7 @@ def build_ml_odds_index(payload):
 
             for o in m.get("outcomes", []):
                 name_raw = (o.get("name") or "").lower()
-                price = o.get("price")  # decimal
+                price = o.get("price")
 
                 team_abbr = ODDS_TEAM_NAME_TO_ABBR.get(name_raw)
                 if not team_abbr:
@@ -443,7 +427,6 @@ def build_ml_odds_index(payload):
     return idx
 
 def decimal_to_american(decimal_odds):
-    """Convert decimal odds (ex: 1.91) → American odds (-110 or +110)."""
     if decimal_odds in ("", None):
         return ""
 
@@ -453,21 +436,13 @@ def decimal_to_american(decimal_odds):
         return ""
 
     if d >= 2.0:
-        # Positive odds
         american = int((d - 1) * 100)
         return f"+{american}"
     else:
-        # Negative odds
         american = int(-100 / (d - 1))
         return str(american)
 
-# ---------------------------------------------------------
-# ML ODDS CONVERSIONS (AMERICAN, NO VIG)
-# ---------------------------------------------------------
 def prob_to_american(prob):
-    """
-    Convert a true probability (0–1) to fair American odds.
-    """
     try:
         prob = float(prob)
     except:
@@ -477,17 +452,11 @@ def prob_to_american(prob):
         return None
 
     if prob >= 0.5:
-        # Favorite → negative odds
         return int(round(-prob / (1 - prob) * 100))
     else:
-        # Underdog → positive odds
         return int(round((1 - prob) / prob * 100))
 
-
 def american_to_prob(odds):
-    """
-    Convert American odds to implied probability.
-    """
     try:
         odds = int(odds)
     except:
@@ -498,9 +467,7 @@ def american_to_prob(odds):
     else:
         return 100 / (odds + 100)
 
-
 def compute_league_shooting_pct(team_stats):
-    """Compute league-average shooting percentage from NST stats."""
     total_goals = 0
     total_shots = 0
 
@@ -512,58 +479,45 @@ def compute_league_shooting_pct(team_stats):
             total_goals += gf
             total_shots += sf
 
-    # avoid zero division — fallback historical 9.6%
     if total_shots == 0:
         return 0.096
 
     return total_goals / total_shots
 
-# ---------------------------------------------------------
-# MODEL PREDICTION (simple GF/GA model)
-# ---------------------------------------------------------
 def blend_recent(season, recent, weight=0.35):
-    """Blend season-long stats with last10 stats."""
     if recent is None:
         return season
     return season * (1 - weight) + recent * weight
 
-
 def predict_total(a_stats, h_stats):
-    """Blend recency GF/GA with season-long xG."""
-    
-    # GF/GA model using recency-adjusted values
-    gfga = (
-        (a_stats["GF_adj"] + h_stats["GA_adj"]) / 2 +
-        (h_stats["GF_adj"] + a_stats["GA_adj"]) / 2
-    )
+    a_gf = a_stats.get("GF_adj", a_stats.get("GF/G", 2.8))
+    a_ga = a_stats.get("GA_adj", a_stats.get("GA/G", 2.8))
+    a_xgf = a_stats.get("xGF_adj", a_stats.get("xGF/G", a_gf))
+    a_xga = a_stats.get("xGA_adj", a_stats.get("xGA/G", a_ga))
 
-    # xG season-level model
-    xg = (
-        (a_stats["xGF_adj"] + h_stats["xGA_adj"]) / 2 +
-        (h_stats["xGF_adj"] + a_stats["xGA_adj"]) / 2
-    )
+    h_gf = h_stats.get("GF_adj", h_stats.get("GF/G", 2.8))
+    h_ga = h_stats.get("GA_adj", h_stats.get("GA/G", 2.8))
+    h_xgf = h_stats.get("xGF_adj", h_stats.get("xGF/G", h_gf))
+    h_xga = h_stats.get("xGA_adj", h_stats.get("xGA/G", h_ga))
+
+    gfga = ((a_gf + h_ga) / 2) + ((h_gf + a_ga) / 2)
+    xg = ((a_xgf + h_xga) / 2) + ((h_xgf + a_xga) / 2)
 
     return 0.55 * gfga + 0.45 * xg
-   
-# ---------------------------------------------------------
-# ML EXPECTED GOALS — TOTAL ANCHORED SPLIT
-# ---------------------------------------------------------
+
 def split_team_xg_from_total(pred_total, away_stats, home_stats):
-    """
-    Split projected total goals into team-level expected goals
-    such that:
-        away_xg + home_xg = pred_total
+    away_strength = (
+        away_stats.get("GF_adj", away_stats.get("GF/G", 2.8)) +
+        home_stats.get("GA_adj", home_stats.get("GA/G", 2.8))
+    ) / 2
 
-    Uses relative offensive/defensive strength.
-    """
-
-    # Strength mirrors totals logic
-    away_strength = (away_stats["GF_adj"] + home_stats["GA_adj"]) / 2
-    home_strength = (home_stats["GF_adj"] + away_stats["GA_adj"]) / 2
+    home_strength = (
+        home_stats.get("GF_adj", home_stats.get("GF/G", 2.8)) +
+        away_stats.get("GA_adj", away_stats.get("GA/G", 2.8))
+    ) / 2
 
     strength_sum = away_strength + home_strength
 
-    # Safety fallback
     if strength_sum <= 0 or pred_total is None:
         return None, None
 
@@ -571,18 +525,8 @@ def split_team_xg_from_total(pred_total, away_stats, home_stats):
     home_xg = pred_total * (home_strength / strength_sum)
 
     return round(away_xg, 2), round(home_xg, 2)
- 
-# ---------------------------------------------------------
-# ML WIN PROBABILITY — PYTHAGOREAN EXPECTATION
-# ---------------------------------------------------------
+
 def pythagorean_win_prob(team_xg, opp_xg, k=2.0):
-    """
-    Compute win probability using a Pythagorean-style expectation.
-
-    P(win) = team_xg^k / (team_xg^k + opp_xg^k)
-
-    k ≈ 2.0 works well for hockey.
-    """
     try:
         team_xg = float(team_xg)
         opp_xg = float(opp_xg)
@@ -597,38 +541,24 @@ def pythagorean_win_prob(team_xg, opp_xg, k=2.0):
         return None
 
     return team_xg ** k / denom
- 
-   
+
 def normal_cdf(x, mu, sigma):
-    """Standard normal CDF for N(mu, sigma^2) using math.erf."""
     z = (x - mu) / (sigma * math.sqrt(2.0))
     return 0.5 * (1.0 + math.erf(z))
 
 def win_prob_normal(pred_total, line, side, sigma=2.00):
-    """
-    Probability that total goes OVER or UNDER the line,
-    assuming total goals ~ Normal(pred_total, sigma^2).
-    """
+    if pred_total is None or line is None:
+        return None
+
     if side.lower() == "over":
-        # P(Total > line) = 1 - CDF(line)
         return 1.0 - normal_cdf(line, pred_total, sigma)
     elif side.lower() == "under":
-        # P(Total < line) = CDF(line)
         return normal_cdf(line, pred_total, sigma)
     else:
         return 0.0
 
-# ---------------------------------------------------------
-# TEAM STATS FROM NATURAL STAT TRICK (ALL SITUATIONS)
-# ---------------------------------------------------------
-@st.cache_data(ttl=21600)  # 6 hours
+@st.cache_data(ttl=21600)
 def compute_team_stats_from_nst():
-    """
-    Pulls all-situations team stats from NaturalStatTrick.
-    Includes GF/G, GA/G, xGF/G, xGA/G, SF/G, SA/G, Pace.
-    """
-    import pandas as pd
-
     url = (
         "https://www.naturalstattrick.com/teamtable.php?"
         "fromseason=20252026&thruseason=20252026&stype=2&sit=all"
@@ -645,12 +575,12 @@ def compute_team_stats_from_nst():
         return {}
 
     df = tables[0]
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
     stats = {}
 
     for _, row in df.iterrows():
-        team = row["team"].upper()
+        team = str(row["team"]).upper().strip()
         gp = row.get("gp", 0)
         if gp == 0:
             continue
@@ -672,11 +602,19 @@ def compute_team_stats_from_nst():
             "SA/G": sa / gp,
             "Pace (SF+SA)": (sf + sa) / gp,
         }
+
     return stats
 
 def compute_last10_stats_apiweb(team_games):
-    """Compute last-10 averages for GF, GA, SF, SA, and Pace."""
-    
+    if not team_games:
+        return {
+            "GF/G_last10": None,
+            "GA/G_last10": None,
+            "SF/G_last10": None,
+            "SA/G_last10": None,
+            "Pace_last10": None,
+        }
+
     if len(team_games) < 10:
         last = team_games
     else:
@@ -697,7 +635,6 @@ def compute_last10_stats_apiweb(team_games):
     }
 
 def format_team_stats(stats):
-    """Return a copy of team stats with floats rounded to 2 decimals."""
     out = {}
     for k, v in stats.items():
         if isinstance(v, float):
@@ -712,45 +649,33 @@ def highlight_confidence(val):
     except:
         return ""
 
-    # HIGH EDGE (>= 1.0) → GREEN
     if abs(num) >= 1.0:
-        return "background-color: #6aff6a;"   # bright green
-
-    # MEDIUM EDGE (>= 0.5) → YELLOW
+        return "background-color: #6aff6a;"
     elif abs(num) >= 0.5:
-        return "background-color: #fff75a;"   # bright yellow
-
-    # LOW EDGE (< 0.5) → RED
+        return "background-color: #fff75a;"
     else:
-        return "background-color: #ff6a6a;"   # bright red
-    
+        return "background-color: #ff6a6a;"
+
 def highlight_ou(row):
-    """Highlight Over/Under Odds cells based on model pick AND confidence level."""
-    
     pick = row.get("Model Pick", "")
     conf = row.get("Confidence", "").upper()
-
     styles = [""] * len(row)
 
-    # Detect confidence level from text
     if "HIGH" in conf:
-        color = "#7CFC90"  # bright green
+        color = "#7CFC90"
     elif "MEDIUM" in conf:
-        color = "#FFF176"  # yellow
+        color = "#FFF176"
     elif "LOW" in conf:
-        color = "#E0E0E0"  # light gray
+        color = "#E0E0E0"
     else:
         color = ""
 
-    # No valid confidence → no highlight
     if color == "":
         return styles
 
-    # Determine which column to highlight
     if pick == "OVER" and "Over Odds" in row.index:
         idx = row.index.get_loc("Over Odds")
         styles[idx] = f"background-color: {color}; font-weight: bold;"
-
     elif pick == "UNDER" and "Under Odds" in row.index:
         idx = row.index.get_loc("Under Odds")
         styles[idx] = f"background-color: {color}; font-weight: bold;"
@@ -764,44 +689,31 @@ def highlight_ev(val):
         return ""
 
     if num >= 10:
-        return "background-color: #00cc00; color: black;"   # bright green
+        return "background-color: #00cc00; color: black;"
     elif num >= 5:
-        return "background-color: #66ff66; color: black;"   # soft green
+        return "background-color: #66ff66; color: black;"
     elif num < 0:
-        return "background-color: #ff9999; color: black;"   # red
+        return "background-color: #ff9999; color: black;"
     else:
         return ""
 
 def compute_ev(pred_total, sportsbook_line, dec_price, side, sigma=1.35):
-    """
-    Returns EV as a numeric value (percent).
-    side = "OVER" or "UNDER"
-    """
     try:
         dec_price = float(dec_price)
     except:
-        return None  # missing odds
+        return None
 
-    # profit for 1-unit stake
     payout = dec_price - 1.0
-
-    # probability model
     win_prob = win_prob_normal(pred_total, sportsbook_line, side, sigma)
 
     if win_prob is None:
         return None
 
-    # EV per unit staked (converted to percent)
     ev_raw = win_prob * payout - (1 - win_prob)
     ev_percent = ev_raw * 100
     return ev_percent
 
 def compute_ev_ml(win_prob, dec_price):
-    """
-    Moneyline EV in percent per 1 unit stake.
-    win_prob = model win probability (0–1)
-    dec_price = sportsbook decimal odds
-    """
     if win_prob is None or dec_price in (None, ""):
         return None
 
@@ -813,13 +725,11 @@ def compute_ev_ml(win_prob, dec_price):
     if d <= 1.0:
         return None
 
-    payout = d - 1.0  # profit per 1 unit stake if win
+    payout = d - 1.0
     ev_raw = win_prob * payout - (1 - win_prob)
     return ev_raw * 100.0
 
 def compute_home_away_splits(team_games):
-    """Compute season-level home/away GF, GA, SF, SA, Pace."""
-    
     home = [g for g in team_games if g["is_home"]]
     away = [g for g in team_games if not g["is_home"]]
 
@@ -832,7 +742,6 @@ def compute_home_away_splits(team_games):
         "SF/G_home": avg(home, "SF"),
         "SA/G_home": avg(home, "SA"),
         "Pace_home": avg(home, "SF") + avg(home, "SA") if home else None,
-
         "GF/G_away": avg(away, "GF"),
         "GA/G_away": avg(away, "GA"),
         "SF/G_away": avg(away, "SF"),
@@ -844,17 +753,9 @@ def compute_home_away_splits(team_games):
 
 @st.cache_data(ttl=86400)
 def fetch_team_over_under():
-    """
-    NEW VERSION — Scrapes ScoresAndOdds using the updated HTML:
-    Team names are in <a data-abbr="Penguins (5)">, and O/U data is
-    stored in <tr data-overs="0.4286" data-unders="0.5714">.
-    """
-
     import time
-    from bs4 import BeautifulSoup
     global _OU_CACHE, _OU_CACHE_TIMESTAMP
 
-    # Cache: 10 minutes
     if _OU_CACHE is not None and _OU_CACHE_TIMESTAMP is not None:
         if time.time() - _OU_CACHE_TIMESTAMP < 600:
             return _OU_CACHE
@@ -877,29 +778,21 @@ def fetch_team_over_under():
 
         results = {}
 
-        # Each team is one <tr>
         for tr in tbody.find_all("tr"):
-            # Example: <tr data-overs="0.4286" data-unders="0.5714">
             over_pct = tr.get("data-overs")
             under_pct = tr.get("data-unders")
 
             if over_pct is None:
-                continue  # Not a valid team row
+                continue
 
-            # Extract team name from the <a data-abbr="Penguins (5)">
             name_tag = tr.find("a", {"data-abbr": True})
             if not name_tag:
                 continue
 
             raw_name = name_tag.get("data-abbr").lower().strip()
-
-            # Remove things like "(5)"
             clean_name = raw_name.split("(")[0].strip()
-
-            # Map to NHL abbreviation
             abbr = ODDS_TEAM_NAME_TO_ABBR.get(clean_name)
             if not abbr:
-                # print("No mapping for:", clean_name)
                 continue
 
             try:
@@ -909,7 +802,6 @@ def fetch_team_over_under():
 
             results[abbr] = over_pct
 
-        # Store in cache
         _OU_CACHE = results
         _OU_CACHE_TIMESTAMP = time.time()
         return results
@@ -918,50 +810,37 @@ def fetch_team_over_under():
         print("O/U scrape failed:", e)
         return {}
 
-
-
-
-
 def render_two_row_table(df):
-
     html = """
     <style>
-
-    /* --- FONT --- */
     @import url('https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap');
 
-    /* --- TABLE CONTAINER --- */
     table.nhl {
         border-collapse: collapse;
         width: 100%;
         font-size: 15px;
         font-family: 'Lato', sans-serif;
-
-        /* Recommended combo additions */
-        border: 3px solid #444;          /* outer frame */
-        border-radius: 10px;             /* rounded corners */
-        overflow: hidden;                /* ensures corners clip */
+        border: 3px solid #444;
+        border-radius: 10px;
+        overflow: hidden;
         box-shadow: 0 2px 6px rgba(0,0,0,0.12);
     }
 
-    /* --- HEADER STYLE --- */
     table.nhl thead th {
-        background: #f7f7f7;             /* subtle tint */
+        background: #f7f7f7;
         font-weight: 700;
-        border-bottom: 3px solid #444 !important;   /* bold separator */
+        border-bottom: 3px solid #444 !important;
         padding: 6px 6px !important;
-        border-left: 1px solid #ccc !important;     /* thin header verticals */
+        border-left: 1px solid #ccc !important;
         border-right: 1px solid #ccc !important;
     }
 
-    /* --- BASE CELL STYLE (modern + compact) --- */
     table.nhl td {
         padding: 5px 6px !important;
         line-height: 1.25;
-        border: 1px solid #d9d9d9 !important;       /* softened thin borders */
+        border: 1px solid #d9d9d9 !important;
     }
 
-    /* --- STACKED DIV CLEANUP --- */
     table.nhl td div {
         border: none !important;
         margin: 2px 0 !important;
@@ -969,7 +848,6 @@ def render_two_row_table(df):
         line-height: 1.2 !important;
     }
 
-        /* --- THIN INTERNAL BORDER BETWEEN AWAY/HOME ROWS --- */
     tr.away-row td,
     tr.away-row td[rowspan] {
         border-bottom: 1px solid #e6e6e6 !important;
@@ -981,31 +859,22 @@ def render_two_row_table(df):
         border-bottom: 1px solid #e6e6e6 !important;
     }
 
-    /* --- THICK MATCHUP SEPARATOR (bottom of home row) --- */
     tr.game-sep td {
         border-bottom: 4px solid #444 !important;
     }
 
-    /* --- EV COLOR CODING --- */
     .ev-pos  { background: #c8f7c5; color: #003300; font-weight: 600; }
     .ev-mid  { background: #fff2b3; color: #664d00; font-weight: 600; }
     .ev-neg  { background: #ffcccc; color: #660000; font-weight: 600; }
 
-    /* --- EDGE COLOR CODING --- */
     .edge-low  { background: #ffcccc; color: #660000; font-weight: 600; }
     .edge-med  { background: #fff2b3; color: #664d00; font-weight: 600; }
     .edge-high { background: #c8f7c5; color: #003300; font-weight: 600; }
 
-    /* ============================================================
-    FINAL BORDER FIX — RESTORES CORRECT ROWSPAN + MATCHUP LINES
-    ============================================================ */
-
-    /* 1) Default thin border for ALL merged cells (rowspan cells) */
     td[rowspan] {
         border-bottom: 1px solid #e6e6e6 !important;
     }
 
-    /* 2) Thin internal border between Away/Home for non-merged cells */
     tr.away-row td:not([rowspan]) {
         border-bottom: 1px solid #e6e6e6 !important;
     }
@@ -1015,13 +884,11 @@ def render_two_row_table(df):
         border-bottom: 1px solid #e6e6e6 !important;
     }
 
-    /* 3) Bold separator BETWEEN matchups */
     tr.away-row.game-sep td[rowspan],
     tr.home-row.game-sep td {
         border-bottom: 4px solid #444 !important;
     }
 
-    /* Sort arrows */
     .sort-arrow {
         font-size: 12px;
         margin-left: 6px;
@@ -1036,88 +903,70 @@ def render_two_row_table(df):
         content: "▼";
     }
 
-    /* Ensures logo + text stay on one line */
     td.team-cell {
         display: flex;
-        align-items: center;        /* vertically align logo & text */
-        gap: 6px;                   /* spacing between logo and text */
+        align-items: center;
+        gap: 6px;
     }
-    /* ==== COMPACT COLUMN WIDTHS ==== */
+
     th, td {
         white-space: nowrap;
     }
 
-    /* ==== STICKY HEADER ==== */
     table.nhl thead th {
         position: sticky;
         top: 0;
         z-index: 5;
     }
-
-    
     </style>
 
     <table class="nhl">
         <thead>
           <tr>
             <th>Team</th>
-
             <th>ML</th>
-
             <th data-sort="none" onclick="sortMatchups(2)">
               ML<br>Diff <span class="sort-arrow"></span>
             </th>
-
             <th data-sort="none" onclick="sortMatchups(3)">
               EV <span class="sort-arrow"></span>
             </th>
-
             <th>Team<br>Ov %</th>
-
             <th rowspan="2" data-sort="none" onclick="sortMatchups(5)">
               Ov % <span class="sort-arrow"></span>
             </th>
-
             <th rowspan="2">Line</th>
-
             <th>O/U Odds</th>
-
             <th rowspan="2">Proj</th>
             <th rowspan="2">Pick</th>
-
             <th rowspan="2" data-sort="none" onclick="sortMatchups(10)">
               Edge <span class="sort-arrow"></span>
             </th>
-
             <th>EV O/U</th>
           </tr>
         </thead>
-        
+
         <colgroup>
-            <col style="width:140px">  <!-- Team -->
-            <col style="width:70px">   <!-- ML Odds -->
-            <col style="width:65px">   <!-- ML Diff -->
-            <col style="width:60px">   <!-- ML EV -->
-            <col style="width:70px">   <!-- Team Ov % -->
-            <col style="width:60px">   <!-- Game Ov % -->
-            <col style="width:60px">   <!-- Line -->
-            <col style="width:85px">   <!-- O/U Odds -->
-            <col style="width:55px">   <!-- Proj -->
-            <col style="width:55px">   <!-- Pick -->
-            <col style="width:55px">   <!-- Edge -->
-            <col style="width:60px">   <!-- EV O/U -->
+            <col style="width:140px">
+            <col style="width:70px">
+            <col style="width:65px">
+            <col style="width:60px">
+            <col style="width:70px">
+            <col style="width:60px">
+            <col style="width:60px">
+            <col style="width:85px">
+            <col style="width:55px">
+            <col style="width:55px">
+            <col style="width:55px">
+            <col style="width:60px">
         </colgroup>
-
-
 
         <tbody>
     """
 
     def get_logo(abbr: str) -> str:
-        """Return logo URL for a team abbr, or empty string if missing."""
         return TEAM_LOGO_URL.get(abbr, "")
-    
-    # EV formatting
+
     def fmt_ev(val):
         try:
             f = float(val)
@@ -1131,7 +980,6 @@ def render_two_row_table(df):
         except:
             return f"<td>{val}</td>"
 
-    # EDGE formatting
     def fmt_edge(val):
         try:
             f = float(val)
@@ -1163,19 +1011,13 @@ def render_two_row_table(df):
             return "<td></td>"
 
     def fmt_ml_goal_diff(val, side):
-        """
-        Show ML Goal Diff only for the advantaged team,
-        but ALWAYS include a numeric data-value for sorting.
-        """
         try:
             f = float(val)
         except:
             return "<td></td>"
 
-        # Use magnitude for sorting
         sort_val = abs(f)
 
-        # No meaningful edge
         if abs(f) < 0.05:
             return f"<td data-value='0'></td>"
 
@@ -1184,7 +1026,6 @@ def render_two_row_table(df):
         if not show:
             return f"<td data-value='{sort_val}'></td>"
 
-        # Color bands
         if sort_val < 0.25:
             css = "edge-low"
         elif sort_val < 0.75:
@@ -1194,10 +1035,7 @@ def render_two_row_table(df):
 
         return f"<td class='{css}' data-value='{sort_val}'>+{sort_val:.2f}</td>"
 
-
-    # Render rows
     for _, row in df.iterrows():
-
         ev_o = fmt_ev(row["EV Over"])
         ev_u = fmt_ev(row["EV Under"])
         edge_cell = fmt_edge(row["Edge"])
@@ -1205,7 +1043,7 @@ def render_two_row_table(df):
         ml_ev_home = fmt_ml_ev(row["ML Home EV"])
         ml_goal_away = fmt_ml_goal_diff(row["ML Goal Diff"], "AWAY")
         ml_goal_home = fmt_ml_goal_diff(row["ML Goal Diff"], "HOME")
-            # NEW: numeric keys for ML EV and O/U EV sorting
+
         ml_ev_sort = max(
             abs(row["ML Away EV"]) if row["ML Away EV"] is not None else 0,
             abs(row["ML Home EV"]) if row["ML Home EV"] is not None else 0,
@@ -1216,8 +1054,6 @@ def render_two_row_table(df):
             abs(row["EV Under"]) if row["EV Under"] is not None else 0,
         )
 
-
-        # AWAY
         html += f"""
         <tr class="away-row game-sep"
             data-ml-ev="{ml_ev_sort}"
@@ -1246,11 +1082,8 @@ def render_two_row_table(df):
 
             {ev_o}
         </tr>
-
         """
 
-
-        # HOME
         html += f"""
         <tr class="home-row game-sep">
             <td class="team-cell">
@@ -1268,9 +1101,7 @@ def render_two_row_table(df):
 
             {ev_u}
         </tr>
-
         """
-
 
     html += "</tbody></table>"
     html += """
@@ -1280,7 +1111,6 @@ def render_two_row_table(df):
       const tbody = table.querySelector("tbody");
       const headers = table.querySelectorAll("thead th");
 
-      // Build matchup pairs
       const rows = Array.from(tbody.querySelectorAll("tr"));
       let matchups = [];
       for (let i = 0; i < rows.length; i++) {
@@ -1290,12 +1120,10 @@ def render_two_row_table(df):
         }
       }
 
-      // Determine sort direction
       const th = headers[colIndex];
       const current = th.getAttribute("data-sort");
       const direction = current === "asc" ? "desc" : "asc";
 
-      // Reset all headers
       headers.forEach(h => {
         h.setAttribute("data-sort", "none");
         const span = h.querySelector(".sort-arrow");
@@ -1306,7 +1134,6 @@ def render_two_row_table(df):
       const arrow = th.querySelector(".sort-arrow");
       if (arrow) arrow.innerHTML = direction === "asc" ? "▲" : "▼";
 
-      // Extract numeric values
       function getVal(row) {
         const cell = row.children[colIndex];
         if (!cell) return 0;
@@ -1321,14 +1148,12 @@ def render_two_row_table(df):
         return Math.abs(parseFloat(txt)) || 0;
       }
 
-      // Sort pairs
       matchups.sort((a, b) => {
         const av = getVal(a[0]);
         const bv = getVal(b[0]);
         return direction === "asc" ? av - bv : bv - av;
       });
 
-      // Re-render
       tbody.innerHTML = "";
       matchups.forEach(pair => {
         tbody.appendChild(pair[0]);
@@ -1336,21 +1161,12 @@ def render_two_row_table(df):
       });
     }
     </script>
-
-
     """
 
     return html
-  
+
 @st.cache_data(ttl=3600)
 def fetch_last5_games_scoresandodds(team_slug, max_games=5):
-    """
-    Returns last 5 games from ScoresAndOdds with:
-    opponent, score, W/L, O/U
-    """
-    import requests
-    from bs4 import BeautifulSoup
-
     url = f"https://www.scoresandodds.com/nhl/teams/{team_slug}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -1362,7 +1178,6 @@ def fetch_last5_games_scoresandodds(team_slug, max_games=5):
         return []
 
     games = []
-
     rows = container.select("li > div.table-list-row")
 
     for row in rows:
@@ -1379,8 +1194,8 @@ def fetch_last5_games_scoresandodds(team_slug, max_games=5):
             continue
 
         team_span = row.select_one("span.table-list-team.win, span.table-list-team.loss")
-        opp_span  = row.select_one("span.table-list-team.opp")
-        ou_span   = row.select_one("span.table-list-odds.ou")
+        opp_span = row.select_one("span.table-list-team.opp")
+        ou_span = row.select_one("span.table-list-odds.ou")
 
         if not team_span or not opp_span or not ou_span:
             continue
@@ -1388,7 +1203,6 @@ def fetch_last5_games_scoresandodds(team_slug, max_games=5):
         result = "W" if "win" in team_span.get("class", []) else "L"
         opp = opp_span.get("data-abbr", "").upper()
 
-        # Parse total line (always shown as over)
         ou_txt = ou_span.get_text(strip=True).lower()
         try:
             line = float(ou_txt.replace("o", "").replace("u", ""))
@@ -1408,30 +1222,17 @@ def fetch_last5_games_scoresandodds(team_slug, max_games=5):
 
     return games
 
-
-
-
-
-# ---------------------------------------------------------
-# STREAMLIT MAIN
-# ---------------------------------------------------------
 def main():
- 
-    from datetime import datetime
-    import time
+    import streamlit.components.v1 as components
 
-    # Title (same as before)
     st.title("GTSB Winners Only Board")
 
-    # Force timezone to Central Time
     central = pytz.timezone("America/Chicago")
     now_ct = datetime.now(central)
 
     today_str = now_ct.strftime("%B %d, %Y")
     updated_str = now_ct.strftime("%Y-%m-%d %I:%M:%S %p")
 
-
-    # Larger header + timestamp underneath
     st.markdown(
         f"""
         <div style="margin-top:-10px;">
@@ -1442,91 +1243,83 @@ def main():
         unsafe_allow_html=True
     )
 
-
-    # Load games
     games = get_games_today()
-    # Get a unique set of teams playing today
-    teams_in_today = set()
 
+    teams_in_today = set()
     for g in games:
         teams_in_today.add(g["away_abbr"])
         teams_in_today.add(g["home_abbr"])
 
-
-    # -------------------------
-    # LOAD NST STATS (FULL NAMES)
-    # -------------------------
+    # FIXED: use NST output directly
     team_stats = compute_team_stats_from_nst()
 
-    # -------------------------
-    # CONVERT FULL NAMES → ABBREVIATIONS
-    # -------------------------
-    converted = {}
+    # If NST returns full names instead of abbreviations, convert only when needed
+    normalized_team_stats = {}
+    for key, stats in team_stats.items():
+        raw_key = str(key).strip()
+        upper_key = raw_key.upper()
+        lower_key = raw_key.lower()
 
-    for full_name, stats in team_stats.items():
-        key_norm = full_name.lower()
-        abbr = ODDS_TEAM_NAME_TO_ABBR.get(key_norm)
-    
-        if abbr:
-            converted[abbr] = stats
+        if len(upper_key) in (3, 4):
+            normalized_team_stats[upper_key] = stats
         else:
-            print("NST WARNING: No abbreviation found for:", full_name)
+            abbr = ODDS_TEAM_NAME_TO_ABBR.get(lower_key)
+            if abbr:
+                normalized_team_stats[abbr] = stats
+            else:
+                print("NST WARNING: No abbreviation found for:", raw_key)
 
-    team_stats = converted
+    team_stats = normalized_team_stats
 
     over_data = fetch_team_over_under()
 
     for abbr, stats in team_stats.items():
         stats["OverPct"] = over_data.get(abbr, None)
 
-    # -------------------------
-    # OPTIMIZED LAST-10 LOOKUPS
-    # Only fetch last-10 for teams playing today
-    # -------------------------
     for abbr, stats in team_stats.items():
-
         if abbr not in teams_in_today:
-            # Still must create last10 fields so the model doesn't break
-            stats["GF/G_last10"] = stats["GF/G"]
-            stats["GA/G_last10"] = stats["GA/G"]
-            stats["SF/G_last10"] = stats["SF/G"]
-            stats["SA/G_last10"] = stats["SA/G"]
-            stats["Pace_last10"] = stats["Pace (SF+SA)"]
+            stats["GF/G_last10"] = stats.get("GF/G", DEFAULT_STATS["GF/G"])
+            stats["GA/G_last10"] = stats.get("GA/G", DEFAULT_STATS["GA/G"])
+            stats["SF/G_last10"] = stats.get("SF/G", DEFAULT_STATS["SF/G"])
+            stats["SA/G_last10"] = stats.get("SA/G", DEFAULT_STATS["SA/G"])
+            stats["Pace_last10"] = stats.get("Pace (SF+SA)", DEFAULT_STATS["Pace (SF+SA)"])
             continue
 
-        # Teams playing today → fetch real last-10
         team_games = get_team_game_log_apiweb(abbr)
 
         if team_games:
             last10 = compute_last10_stats_apiweb(team_games)
             stats.update(last10)
         else:
-            # fallback → use season averages
             stats.update({
-                "GF/G_last10": stats["GF/G"],
-                "GA/G_last10": stats["GA/G"],
-                "SF/G_last10": stats["SF/G"],
-                "SA/G_last10": stats["SA/G"],
-                "Pace_last10": stats["Pace (SF+SA)"],
+                "GF/G_last10": stats.get("GF/G", DEFAULT_STATS["GF/G"]),
+                "GA/G_last10": stats.get("GA/G", DEFAULT_STATS["GA/G"]),
+                "SF/G_last10": stats.get("SF/G", DEFAULT_STATS["SF/G"]),
+                "SA/G_last10": stats.get("SA/G", DEFAULT_STATS["SA/G"]),
+                "Pace_last10": stats.get("Pace (SF+SA)", DEFAULT_STATS["Pace (SF+SA)"]),
             })
-    # ---------------------------
-    # APPLY RECENCY BLENDING
-    # ---------------------------
+
     RECENCY_WEIGHT = 0.50
 
     for team, stats in team_stats.items():
+        stats["GF_adj"] = blend_recent(
+            stats.get("GF/G", DEFAULT_STATS["GF/G"]),
+            stats.get("GF/G_last10", stats.get("GF/G", DEFAULT_STATS["GF/G"])),
+            RECENCY_WEIGHT
+        )
+        stats["GA_adj"] = blend_recent(
+            stats.get("GA/G", DEFAULT_STATS["GA/G"]),
+            stats.get("GA/G_last10", stats.get("GA/G", DEFAULT_STATS["GA/G"])),
+            RECENCY_WEIGHT
+        )
+        stats["xGF_adj"] = stats.get("xGF/G", DEFAULT_STATS["xGF/G"])
+        stats["xGA_adj"] = stats.get("xGA/G", DEFAULT_STATS["xGA/G"])
+        stats["Pace_adj"] = blend_recent(
+            stats.get("Pace (SF+SA)", DEFAULT_STATS["Pace (SF+SA)"]),
+            stats.get("Pace_last10", stats.get("Pace (SF+SA)", DEFAULT_STATS["Pace (SF+SA)"])),
+            RECENCY_WEIGHT
+        )
 
-        stats["GF_adj"] = blend_recent(stats["GF/G"], stats["GF/G_last10"], RECENCY_WEIGHT)
-        stats["GA_adj"] = blend_recent(stats["GA/G"], stats["GA/G_last10"], RECENCY_WEIGHT)
-
-        # xG stays season-level because NHL API doesn't give xG per game (Option A)
-        stats["xGF_adj"] = stats["xGF/G"]
-        stats["xGA_adj"] = stats["xGA/G"]
-
-        # Blended pace
-        stats["Pace_adj"] = blend_recent(stats["Pace (SF+SA)"], stats["Pace_last10"], RECENCY_WEIGHT) 
-    
-    # Load odds
     st.write("✅ Fetching DraftKings odds…")
     odds_payload = get_odds_draftkings_only()
     odds_idx = build_odds_index(odds_payload)
@@ -1534,9 +1327,6 @@ def main():
 
     rows = []
 
-    # -----------------------------
-    # BUILD TABLE FOR TODAY'S GAMES
-    # -----------------------------
     for g in games:
         away = g["away_abbr"]
         home = g["home_abbr"]
@@ -1545,60 +1335,45 @@ def main():
         odds = odds_idx.get(key, {})
         ml_odds = ml_odds_idx.get(key, {})
 
+        away_stats = team_stats.get(away, DEFAULT_STATS.copy())
+        home_stats = team_stats.get(home, DEFAULT_STATS.copy())
 
-        away_stats = team_stats.get(away, {"GF/G": 2.8, "GA/G": 2.8})
-        home_stats = team_stats.get(home, {"GF/G": 2.8, "GA/G": 2.8})
-        
         predicted = round(predict_total(away_stats, home_stats), 2)
-        # ---------------------------
-        # ML expected goals (total-anchored)
-        # ---------------------------
+
         away_xg, home_xg = split_team_xg_from_total(
             predicted,
             away_stats,
             home_stats
         )
-        # ML goal differential (HOME − AWAY)
+
         ml_goal_diff = (
             round(home_xg - away_xg, 2)
             if away_xg is not None and home_xg is not None
             else None
         )
 
-        # Initialize ML variables (IMPORTANT)
         away_ml_prob = None
         home_ml_prob = None
         away_ml_fair = None
         home_ml_fair = None
 
-        # ---------------------------
-        # ML win probabilities
-        # ---------------------------
         if away_xg is not None and home_xg is not None:
             away_ml_prob = pythagorean_win_prob(away_xg, home_xg, k=2.0)
             home_ml_prob = pythagorean_win_prob(home_xg, away_xg, k=2.0)
 
-        # ---------------------------
-        # ML fair odds (model, no vig)
-        # ---------------------------
         if away_ml_prob is not None and home_ml_prob is not None:
             away_ml_fair = prob_to_american(away_ml_prob)
             home_ml_fair = prob_to_american(home_ml_prob)
 
-        # ---------------------------
-        # DraftKings ML odds + implied probs + EV
-        # ---------------------------
         dk_away_ml_dec = ml_odds.get("away_ml_dec")
         dk_home_ml_dec = ml_odds.get("home_ml_dec")
 
         dk_away_ml_amer = decimal_to_american(dk_away_ml_dec) if dk_away_ml_dec else ""
         dk_home_ml_amer = decimal_to_american(dk_home_ml_dec) if dk_home_ml_dec else ""
 
-        # Implied probabilities from DK
         away_ml_implied = decimal_to_prob(dk_away_ml_dec) if dk_away_ml_dec else None
         home_ml_implied = decimal_to_prob(dk_home_ml_dec) if dk_home_ml_dec else None
 
-        # Edge in probability space (percentage points)
         away_ml_edge_pct = None
         home_ml_edge_pct = None
 
@@ -1608,11 +1383,9 @@ def main():
         if home_ml_prob is not None and home_ml_implied is not None:
             home_ml_edge_pct = (home_ml_prob - home_ml_implied) * 100.0
 
-        # EV per 1-unit stake (percent)
         away_ml_ev = compute_ev_ml(away_ml_prob, dk_away_ml_dec)
         home_ml_ev = compute_ev_ml(home_ml_prob, dk_home_ml_dec)
 
-        # Helpers for future best ML bet logic
         ev_a = away_ml_ev if away_ml_ev is not None else -999
         ev_h = home_ml_ev if home_ml_ev is not None else -999
 
@@ -1624,11 +1397,6 @@ def main():
 
         _ML_EDGE_ABS = max(edge_a, edge_h)
 
-        
-
-        # ---------------------------
-        # CONFIDENCE METRIC + MODEL PICK + BOTH EVs
-        # ---------------------------
         model_pick = ""
         dist = None
         sportsbook_line = None
@@ -1637,17 +1405,13 @@ def main():
         over_dec = odds.get("over")
         under_dec = odds.get("under")
 
-        # ---------------------------
-        # EDGE + model pick direction
-        # ---------------------------
         edge = ""
 
         if line not in ("", None):
             try:
                 sportsbook_line = float(line)
-                dist = predicted - sportsbook_line   # signed difference
+                dist = predicted - sportsbook_line
 
-                # MODEL PICK LOGIC
                 if dist > 0:
                     model_pick = "OVER"
                 elif dist < 0:
@@ -1655,14 +1419,12 @@ def main():
                 else:
                     model_pick = ""
 
-                # EDGE VALUE (numeric only, formatted)
                 if dist > 0:
                     edge = f"+{abs(dist):.2f}"
                 elif dist < 0:
                     edge = f"-{abs(dist):.2f}"
                 else:
                     edge = "0.00"
-
             except:
                 edge = ""
                 model_pick = ""
@@ -1670,18 +1432,12 @@ def main():
             model_pick = ""
             edge = ""
 
-
-
-        # ---------------------------
-        # EV FOR BOTH OVER & UNDER
-        # ---------------------------
         ev_over = compute_ev(predicted, sportsbook_line, over_dec, "OVER")
         ev_under = compute_ev(predicted, sportsbook_line, under_dec, "UNDER")
 
         away_over_pct = team_stats.get(away, {}).get("OverPct")
         home_over_pct = team_stats.get(home, {}).get("OverPct")
 
-        # Format as integer % or blank
         def fmt_pct(x):
             try:
                 return round(float(x) * 100)
@@ -1691,23 +1447,17 @@ def main():
         away_over_pct_fmt = fmt_pct(away_over_pct)
         home_over_pct_fmt = fmt_pct(home_over_pct)
 
-        # Game Over% = average of the two
         if away_over_pct is not None and home_over_pct is not None:
             game_over_pct = round((away_over_pct + home_over_pct) / 2 * 100)
         else:
             game_over_pct = ""
 
-
-
-
         rows.append({
             "Away": away,
             "Home": home,
-
             "Away Over %": away_over_pct_fmt,
             "Home Over %": home_over_pct_fmt,
             "Game Over %": game_over_pct,
-
             "Line": line,
             "Over": decimal_to_american(over_dec),
             "Under": decimal_to_american(under_dec),
@@ -1716,14 +1466,11 @@ def main():
             "Edge": edge,
             "EV Over": ev_over,
             "EV Under": ev_under,
-
-            # store metrics for choosing daily winners
             "_EV_MAX": max(ev_over if pd.notna(ev_over) else -999,
-                        ev_under if pd.notna(ev_under) else -999),
+                           ev_under if pd.notna(ev_under) else -999),
             "_EV_SIDE": "OVER" if (ev_over or -999) >= (ev_under or -999) else "UNDER",
             "_DIST": abs(dist) if dist is not None else -999,
             "_MODEL_PICK": model_pick,
-            # --- ML MODEL FIELDS (per game) ---
             "ML Away xG": away_xg,
             "ML Home xG": home_xg,
             "ML Goal Diff": ml_goal_diff,
@@ -1735,72 +1482,57 @@ def main():
             "ML Home DK": dk_home_ml_amer,
             "ML Away EV": away_ml_ev,
             "ML Home EV": home_ml_ev,
-            
             "_ML_EV_MAX": _ML_EV_MAX,
             "_ML_SIDE": _ML_EV_SIDE,
             "_ML_EDGE_ABS": _ML_EDGE_ABS,
-            
         })
 
-
-
-
-
-
-
+    if not rows:
+        st.warning("No pregame NHL matchups found for today, or the feeds did not return usable data.")
+        return
 
     df = pd.DataFrame(rows)
-    
-    # Identify best bet
-    best_bet_idx = df["_EV_MAX"].idxmax()
-    best_bet_side = df.loc[best_bet_idx, "_EV_SIDE"]
 
-    # Identify best value
+    best_bet_idx = df["_EV_MAX"].idxmax()
     best_value_idx = df["_DIST"].idxmax()
-    best_value_side = df.loc[best_value_idx, "_MODEL_PICK"]
-    
-    # ---------- BEST BET STAR ----------
+
     current = df.at[best_bet_idx, "Model Pick"]
     if not isinstance(current, str):
         current = ""
     df.at[best_bet_idx, "Model Pick"] = current.rstrip() + " ⭐"
 
-    # ---------- BEST VALUE DIAMOND ----------
     current = df.at[best_value_idx, "Model Pick"]
     if not isinstance(current, str):
-        current = ""     # ensures no errors
+        current = ""
     df.at[best_value_idx, "Model Pick"] = current.rstrip() + " ◆"
 
-    # Drop helper columns
     df = df.drop(columns=["_EV_MAX", "_EV_SIDE", "_DIST", "_MODEL_PICK"])
 
-    # Ensure numeric types for formatting in HTML
     df["Line"] = pd.to_numeric(df["Line"], errors="ignore")
     df["Proj"] = pd.to_numeric(df["Proj"], errors="ignore")
     df["EV Over"] = pd.to_numeric(df["EV Over"], errors="coerce")
     df["EV Under"] = pd.to_numeric(df["EV Under"], errors="coerce")
 
     st.subheader("Today's Games")
-   
-    # ---- ONLY THIS: render HTML table ----
+
     html_table = render_two_row_table(df)
-    
-    import streamlit.components.v1 as components
     components.html(html_table, height=900, scrolling=True)
-    
+
     st.markdown("---")
     st.header("🔍 Explain Matchup")
 
-    # Build matchup options
     matchup_map = {
         f"{g['away_abbr']} @ {g['home_abbr']}": g
         for g in games
     }
 
-    # Default to Best Bet matchup if available
+    if not matchup_map:
+        st.info("No matchups available to explain.")
+        return
+
     default_matchup = list(matchup_map.keys())[0]
     if "⭐" in df["Model Pick"].astype(str).to_string():
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
             if "⭐" in str(row["Model Pick"]):
                 default_matchup = f"{row['Away']} @ {row['Home']}"
                 break
@@ -1815,8 +1547,8 @@ def main():
     away = g["away_abbr"]
     home = g["home_abbr"]
 
-    away_stats = team_stats.get(away, {})
-    home_stats = team_stats.get(home, {})
+    away_stats = team_stats.get(away, DEFAULT_STATS.copy())
+    home_stats = team_stats.get(home, DEFAULT_STATS.copy())
 
     def compact_line(label, season, last10, trend_html):
         return (
@@ -1826,8 +1558,6 @@ def main():
             f"</div>"
         )
 
-
-
     def trend_fmt(season, last10):
         try:
             delta = last10 - season
@@ -1836,15 +1566,12 @@ def main():
 
         delta = round(delta, 2)
 
-        # Neutral
         if abs(delta) < 0.05:
             return "<span style='color:gray;'>— 0.00</span>"
 
-        # Positive
         if delta > 0:
             return f"<span style='color:green; font-weight:600;'>▲ +{delta}</span>"
 
-        # Negative
         return f"<span style='color:red; font-weight:600;'>▼ {delta}</span>"
 
     def trend(season, last10):
@@ -1865,22 +1592,19 @@ def main():
             return []
 
         games = fetch_last5_games_scoresandodds(slug)
-
         out = []
 
         for g in games:
-            result = g["result"]          # "W" or "L"
-            score  = g["score"]           # "3-2"
-            opp    = g["opp"]             # "OTT"
-            ou     = g.get("ou")           # "O" / "U" / None
+            result = g["result"]
+            score = g["score"]
+            opp = g["opp"]
+            ou = g.get("ou")
 
-            # Color W/L
             if result == "W":
                 res_html = "<span style='color:#2E7D32; font-weight:600;'>W</span>"
             else:
                 res_html = "<span style='color:#C62828; font-weight:600;'>L</span>"
 
-            # O/U display
             if ou == "O":
                 ou_html = " (OVER)"
             elif ou == "U":
@@ -1888,21 +1612,14 @@ def main():
             else:
                 ou_html = ""
 
-
             out.append(f"{res_html} {score} vs {opp}{ou_html}")
 
         return out
 
-
-
-
-
     colA, colB = st.columns(2)
 
-    # ---------------- AWAY TEAM ----------------
     with colA:
         st.subheader(f"{away} (Away)")
-
         st.markdown("**Season vs Last 10**")
 
         st.markdown(
@@ -1938,8 +1655,6 @@ def main():
             unsafe_allow_html=True
         )
 
-
-
         st.markdown("**Last 5 Games**")
         for r in last5_results(away):
             st.markdown(
@@ -1947,11 +1662,8 @@ def main():
                 unsafe_allow_html=True
             )
 
-
-    # ---------------- HOME TEAM ----------------
     with colB:
         st.subheader(f"{home} (Home)")
-
         st.markdown("**Season vs Last 10**")
 
         st.markdown(
@@ -1987,7 +1699,6 @@ def main():
             unsafe_allow_html=True
         )
 
-
         st.markdown("**Last 5 Games**")
         for r in last5_results(home):
             st.markdown(
@@ -1995,9 +1706,5 @@ def main():
                 unsafe_allow_html=True
             )
 
-
-
 if __name__ == "__main__":
     main()
-
-
