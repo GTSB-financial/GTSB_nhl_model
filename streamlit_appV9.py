@@ -1508,11 +1508,11 @@ def main():
 
     df = df.drop(columns=["_EV_MAX", "_EV_SIDE", "_DIST", "_MODEL_PICK"])
 
-    df["Line"] = pd.to_numeric(df["Line"], errors="ignore")
-    df["Proj"] = pd.to_numeric(df["Proj"], errors="ignore")
+    # Ensure numeric types for formatting in HTML
+    df["Line"] = pd.to_numeric(df["Line"], errors="coerce")
+    df["Proj"] = pd.to_numeric(df["Proj"], errors="coerce")
     df["EV Over"] = pd.to_numeric(df["EV Over"], errors="coerce")
     df["EV Under"] = pd.to_numeric(df["EV Under"], errors="coerce")
-
     st.subheader("Today's Games")
 
     html_table = render_two_row_table(df)
