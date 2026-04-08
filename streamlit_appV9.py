@@ -1299,7 +1299,7 @@ def main():
                 "Pace_last10": stats.get("Pace (SF+SA)", DEFAULT_STATS["Pace (SF+SA)"]),
             })
 
-    RECENCY_WEIGHT = 0.50
+    RECENCY_WEIGHT = 0.75
 
     for team, stats in team_stats.items():
         stats["GF_adj"] = blend_recent(
